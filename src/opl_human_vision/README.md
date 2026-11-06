@@ -132,3 +132,9 @@ camera input and camera/model settings on both branches. Compare raw ID switches
 recovery after occlusion, false tracks, callback time, and FPS; recognition/TF
 should still stop on ambiguity. Camera behavior and Jetson performance require
 hardware testing; the deterministic tests do not establish either.
+
+## Automatic MCP person following
+
+The `following_target` node now exposes `/person_tracking/set_enabled` (`std_srvs/srv/SetBool`). Enabling requires exactly one fresh, unambiguous raw track with valid depth; no enrollment or identity ID is needed. It publishes that selected person's TF as `opl_hr_track_<raw_track_id>` and valid `/following_target` observations. Disabling clears the selection and stops TF updates. A selected target is never replaced automatically; ambiguity, disappearance, or a prolonged stream gap latches loss until the operator stops and starts following again. Temporary invalid depth pauses output and can recover on the same continuing raw track.
+
+The existing `/select_following_target` enrolled-ID workflow remains available. The MCP `follow_person` tool automatically calls the tracking and following enable services, and `cancel_navigation` confirms following/navigation stop. The tracking node itself never commands base motion.

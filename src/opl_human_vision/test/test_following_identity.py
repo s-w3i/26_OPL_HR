@@ -159,9 +159,47 @@ class FollowingIdentityTest(unittest.TestCase):
         self.node.last_receive -= 1.0
         self.node.watchdog()
         self.assertEqual(self.node.state, FollowingTarget.LOST)
+
         self.assertEqual(self.node.identity, 3)
         self.b.identity_state = self.b.TRACKED
         self.observe([self.a, self.b])
+        self.assertEqual(self.node.state, FollowingTarget.LOST)
+
+    def test_brief_stale_pose_pauses_then_recovers_same_track(self):
+        self.observe([self.a])
+        self.assertTrue(self.select(2).success)
+        self.a.identity_state = self.a.TRACKED
+        self.node.last_receive -= 0.2
+        self.node.last_header.stamp = rclpy.time.Time(
+            nanoseconds=self.node.get_clock().now().nanoseconds - 200000000).to_msg()
+        self.node.watchdog()
+        self.assertEqual(self.node.state, FollowingTarget.LOST)
+        self.assertEqual(self.node.reacquire_after, -1)
+        self.observe([self.a])
+        self.assertEqual(self.node.state, FollowingTarget.TRACKING)
+
+    def test_new_fresh_observation_does_not_inherit_old_pose_timeout(self):
+        self.observe([self.a])
+        self.assertTrue(self.select(2).success)
+        self.a.identity_state = self.a.TRACKED
+        self.node.last_receive -= 0.2
+        self.node.last_header.stamp = rclpy.time.Time(
+            nanoseconds=self.node.get_clock().now().nanoseconds - 200000000).to_msg()
+        self.observe([self.a])
+        self.assertEqual(self.node.state, FollowingTarget.TRACKING)
+
+    def test_long_gap_still_requires_face_reacquisition(self):
+        self.observe([self.a])
+        self.assertTrue(self.select(2).success)
+        self.node.last_receive -= 0.2
+        self.node.watchdog()
+        self.assertEqual(self.node.state, FollowingTarget.LOST)
+        self.assertEqual(self.node.reacquire_after, -1)
+        self.node.last_receive -= 0.8
+        self.node.watchdog()
+        self.assertGreaterEqual(self.node.reacquire_after, 0)
+        self.a.identity_state = self.a.TRACKED
+        self.observe([self.a])
         self.assertEqual(self.node.state, FollowingTarget.LOST)
 
     def test_no_tf_updates_for_invalid_pose_prediction_or_stale_input(self):
@@ -205,3 +243,32 @@ class FollowingIdentityTest(unittest.TestCase):
         self.assertFalse(self.select(3).success)
         self.assertEqual(self.node.identity, 2)
         self.assertFalse(self.select(1000000000).success)
+
+    def test_configured_capture_age_does_not_relax_receipt_watchdog(self):
+        self.node.destroy_node()
+        self.node = module.FollowingTargetNode(parameter_overrides=[
+            rclpy.parameter.Parameter('max_observation_age_sec', value=0.30)])
+        msg = self.message([self.a])
+        msg.header.stamp = rclpy.time.Time(
+            nanoseconds=self.node.get_clock().now().nanoseconds - 225000000).to_msg()
+        self.node.tracks(msg)
+        self.node.recognized(msg)
+        self.assertTrue(self.select(2).success)
+        self.assertEqual(self.node.state, FollowingTarget.TRACKING)
+        self.node.last_receive -= 0.16
+        self.node.watchdog()
+        self.assertEqual(self.node.state, FollowingTarget.LOST)
+        self.assertFalse(self.select(2).success)
+
+    def test_capture_age_over_configured_limit_is_rejected(self):
+        self.node.destroy_node()
+        self.node = module.FollowingTargetNode(parameter_overrides=[
+            rclpy.parameter.Parameter('max_observation_age_sec', value=0.30)])
+        msg = self.message([self.a])
+        msg.header.stamp = rclpy.time.Time(
+            nanoseconds=self.node.get_clock().now().nanoseconds - 350000000).to_msg()
+        self.node.tracks(msg)
+        self.node.recognized(msg)
+        response = self.select(2)
+        self.assertFalse(response.success)
+        self.assertIn('maximum 300 ms', response.message)

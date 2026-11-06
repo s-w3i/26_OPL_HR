@@ -12,7 +12,7 @@ from launch.substitutions import PathJoinSubstitution
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('opl_human_vision')
-    models_dir = os.path.join(pkg_share, 'laptop_models')
+    models_dir = os.path.join(pkg_share, 'models')
 
     # Default model file paths
     default_detector_model = os.path.join(models_dir, 'yolov8n-pose.engine')
@@ -25,10 +25,18 @@ def generate_launch_description():
     # -------------------------------------------------------------------------
     width_arg   = DeclareLaunchArgument('image_width', default_value='640', description='Camera frame width')
     height_arg  = DeclareLaunchArgument('image_height', default_value='480', description='Camera frame height')
-    fps_arg     = DeclareLaunchArgument('framerate', default_value='30', description='Camera fps')
+    fps_arg     = DeclareLaunchArgument('framerate', default_value='15', description='Camera fps when launching the driver')
     device_arg  = DeclareLaunchArgument('video_device', default_value='0', description='Video device ID')
     camera_type_arg = DeclareLaunchArgument('camera_type', default_value='gemini335', choices=['gemini335', 'realsense'], description='RGB-D camera driver: Orbbec Gemini 335 or RealSense')
+    launch_camera_arg = DeclareLaunchArgument(
+        'launch_camera',
+        default_value=PythonExpression(["'false' if '", LaunchConfiguration('camera_type'), "' == 'gemini335' else 'true'"]),
+        choices=['true', 'false'],
+        description='Start a locally attached camera; false uses the existing Pi head_camera for Gemini')
     visualizer_arg = DeclareLaunchArgument('enable_visualizer', default_value='false', description='Show the OpenCV visualization window')
+    following_age_arg = DeclareLaunchArgument(
+        'following_max_observation_age_sec', default_value='0.30',
+        description='Maximum captured-position age for following; receipt watchdog remains 0.15 seconds')
 
     # -------------------------------------------------------------------------
     # 2. YOLO Human Detector Node Parameters
@@ -79,12 +87,40 @@ def generate_launch_description():
     # -------------------------------------------------------------------------
     # Topic Definitions
     # -------------------------------------------------------------------------
-    image_topic = PythonExpression(["'camera/color/image_raw' if '", LaunchConfiguration('camera_type'), "' == 'gemini335' else 'camera/camera/color/image_raw'"])
-    camera_info_topic = PythonExpression(["'camera/color/camera_info' if '", LaunchConfiguration('camera_type'), "' == 'gemini335' else 'camera/camera/color/camera_info'"])
+    remote_gemini = PythonExpression([
+        "'", LaunchConfiguration('camera_type'), "' == 'gemini335' and '",
+        LaunchConfiguration('launch_camera'), "' == 'false'"])
+    image_topic = PythonExpression([
+        "'/vision/color/image_raw' if (", remote_gemini, ") else ('/camera/color/image_raw' if '",
+        LaunchConfiguration('camera_type'), "' == 'gemini335' else '/camera/camera/color/image_raw')"])
+    camera_info_topic = PythonExpression([
+        "'/head_camera/color/camera_info' if (", remote_gemini, ") else ('/camera/color/camera_info' if '",
+        LaunchConfiguration('camera_type'), "' == 'gemini335' else '/camera/camera/color/camera_info')"])
     detections_topic = 'raw_detections'
     tracked_topic    = 'tracked_humans'
     recognized_topic = 'recognized_humans'
-    depth_topic = PythonExpression(["'camera/depth/image_raw' if '", LaunchConfiguration('camera_type'), "' == 'gemini335' else 'camera/camera/aligned_depth_to_color/image_raw'"])
+    depth_topic = PythonExpression([
+        "'/vision/depth/image_raw' if (", remote_gemini, ") else ('/camera/depth/image_raw' if '",
+        LaunchConfiguration('camera_type'), "' == 'gemini335' else '/camera/camera/aligned_depth_to_color/image_raw')"])
+
+    # Decode once on the Jetson; every vision node consumes the local raw topics.
+    camera_decoders = [
+        Node(
+            package='image_transport', executable='republish',
+            name=f'{stream}_decoder',
+            parameters=[{
+                'in_transport': transport, 'out_transport': 'raw',
+                f'qos_overrides./head_camera/{stream}/image_raw/{transport}.subscription.depth': 1,
+                f'qos_overrides./head_camera/{stream}/image_raw/{transport}.subscription.reliability': 'best_effort',
+                f'qos_overrides./vision/{stream}/image_raw.publisher.depth': 1,
+                f'qos_overrides./vision/{stream}/image_raw.publisher.reliability': 'best_effort',
+            }],
+            remappings=[(f'in/{transport}', f'/head_camera/{stream}/image_raw/{transport}'),
+                        ('out', f'/vision/{stream}/image_raw')],
+            condition=IfCondition(remote_gemini), output='screen',
+        )
+        for stream, transport in [('color', 'compressed'), ('depth', 'compressedDepth')]
+    ]
 
     # RealSense Camera Profile Expression ("640x480x30")
     rs_profile = PythonExpression([
@@ -184,7 +220,7 @@ def generate_launch_description():
 
     realsense_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([FindPackageShare('realsense2_camera'), 'launch', 'rs_launch.py'])),
-        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('camera_type'), "' == 'realsense'"])),
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('camera_type'), "' == 'realsense' and '", LaunchConfiguration('launch_camera'), "' == 'true'"])),
         launch_arguments={
             'align_depth.enable': 'true',
             'depth_module.depth_profile': rs_profile,
@@ -194,7 +230,7 @@ def generate_launch_description():
 
     gemini_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([FindPackageShare('opl_gemini335'), 'launch', 'gemini335.launch.py'])),
-        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('camera_type'), "' == 'gemini335'"])),
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('camera_type'), "' == 'gemini335' and '", LaunchConfiguration('launch_camera'), "' == 'true'"])),
         launch_arguments={
             'image_width': LaunchConfiguration('image_width'),
             'image_height': LaunchConfiguration('image_height'),
@@ -217,6 +253,7 @@ def generate_launch_description():
         package='opl_human_vision',
         executable='following_target.py',
         name='following_target',
+        parameters=[{'max_observation_age_sec': LaunchConfiguration('following_max_observation_age_sec')}],
         output='screen',
     )
 
@@ -229,7 +266,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         # Camera Arguments
-        width_arg, height_arg, fps_arg, device_arg, camera_type_arg, visualizer_arg,
+        width_arg, height_arg, fps_arg, device_arg, camera_type_arg, launch_camera_arg, visualizer_arg, following_age_arg,
         # Detector Arguments
         detector_model_arg, detector_conf_arg, detector_nms_arg,
         # Tracker Arguments
@@ -244,5 +281,5 @@ def generate_launch_description():
         confirm_frames_arg, confirm_dur_arg, identity_lock_grace_arg, session_reid_timeout_arg,
         spatial_gate_age_arg, spatial_gate_base_arg, spatial_speed_arg, depth_gate_arg, identity_validation_arg,
         # Execution Nodes
-        *vision_containers, realsense_node, gemini_node, visualizer_node, following_target_node, activator_node
+        *camera_decoders, *vision_containers, realsense_node, gemini_node, visualizer_node, following_target_node, activator_node
     ])
