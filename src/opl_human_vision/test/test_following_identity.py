@@ -62,6 +62,107 @@ class FollowingIdentityTest(unittest.TestCase):
         while time.monotonic() < end:
             rclpy.spin_once(self.probe, timeout_sec=0.005)
 
+    def test_prediction_flags_only_authorize_ordinary_missed_detection(self):
+        output=[]
+        self.node.pub=type('Capture',(),{'publish':lambda _,m:output.append(m)})()
+        self.observe([self.a]);self.select(2)
+        self.assertTrue(output[-1].observed)
+        self.assertFalse(output[-1].prediction_allowed)
+        stamp=output[-1].header.stamp
+        self.a.observed=False
+        self.observe([self.a])
+        self.assertFalse(output[-1].observed)
+        self.assertTrue(output[-1].prediction_allowed)
+        self.assertEqual(output[-1].header.stamp,stamp)
+        self.node.last_receive-=.16;self.node.watchdog()
+        self.assertFalse(output[-1].prediction_allowed)
+
+    def test_ordinary_loss_can_predict_past_750ms_but_stops_at_two_point_five_seconds(self):
+        from unittest.mock import patch
+        output=[]
+        self.node.pub=type('Capture',(),{'publish':lambda _,m:output.append(m)})()
+        self.observe([self.a]);self.select(2)
+        original=self.node.get_clock().now().nanoseconds
+        self.a.observed=False
+        with patch.object(self.node.get_clock(),'now',return_value=rclpy.time.Time(nanoseconds=original+2_300_000_000)):
+            self.observe([self.a])
+            self.assertTrue(output[-1].prediction_allowed)
+            self.assertFalse(output[-1].observed)
+        with patch.object(self.node.get_clock(),'now',return_value=rclpy.time.Time(nanoseconds=original+2_510_000_000)):
+            self.observe([self.a])
+            self.assertFalse(output[-1].prediction_allowed)
+
+    def test_unconfirmed_same_track_uses_only_last_measured_position_until_confirmed(self):
+        output=[]
+        self.node.pub=type('Capture',(),{'publish':lambda _,m:output.append(m)})()
+        self.observe([self.a]);self.select(2)
+        stamp=self.node.last_good[0].stamp
+        original_z=self.node.last_good[1].position_3d.z
+        self.a.identity_state=self.a.UNCONFIRMED;self.a.track_id=1000000001;self.a.name='unknown'
+        self.node.recognized(self.message([self.a]))
+        self.assertTrue(output[-1].prediction_allowed)
+        self.assertFalse(output[-1].observed)
+        self.assertFalse(self.select(2).success)
+        self.a.position_3d.z=3.;self.observe([self.a])
+        self.assertEqual(self.node.last_good[0].stamp,stamp)
+        self.assertEqual(self.node.last_good[1].position_3d.z,original_z)
+        self.a.identity_state=self.a.FACE_CONFIRMED;self.a.track_id=2;self.a.name='furia'
+        self.observe([self.a])
+        self.assertTrue(output[-1].observed)
+        self.assertFalse(output[-1].prediction_allowed)
+        self.assertEqual(self.node.last_good[1].position_3d.z,3.)
+
+    def test_conflicting_identity_cannot_resume_an_unconfirmed_gap(self):
+        output=[]
+        self.node.pub=type('Capture',(),{'publish':lambda _,m:output.append(m)})()
+        self.observe([self.a]);self.select(2)
+        self.a.identity_state=self.a.UNCONFIRMED;self.a.track_id=1000000001
+        self.node.recognized(self.message([self.a]))
+        self.assertTrue(output[-1].prediction_allowed)
+        self.a.identity_state=self.a.FACE_CONFIRMED;self.a.track_id=3
+        self.observe([self.a])
+        self.assertFalse(output[-1].prediction_allowed)
+        self.assertFalse(output[-1].observed)
+        self.assertEqual(self.node.identity,2)
+        self.assertGreaterEqual(self.node.reacquire_after,0)
+
+    def test_unconfirmed_gap_still_rejects_depth_failure_and_ambiguity(self):
+        output=[]
+        self.node.pub=type('Capture',(),{'publish':lambda _,m:output.append(m)})()
+        self.observe([self.a]);self.select(2)
+        self.a.identity_state=self.a.UNCONFIRMED;self.a.track_id=1000000001
+        self.node.recognized(self.message([self.a]))
+        self.a.position_valid=False;self.observe([self.a])
+        self.assertFalse(output[-1].prediction_allowed)
+        self.a.position_valid=True;self.a.association_ambiguous=True;self.observe([self.a])
+        self.assertFalse(output[-1].prediction_allowed)
+
+    def test_unconfirmed_gap_expires_without_refreshing_the_capture_stamp(self):
+        from unittest.mock import patch
+        output=[]
+        self.node.pub=type('Capture',(),{'publish':lambda _,m:output.append(m)})()
+        self.observe([self.a]);self.select(2)
+        original=self.node.get_clock().now().nanoseconds
+        self.a.identity_state=self.a.UNCONFIRMED;self.a.track_id=1000000001
+        self.node.recognized(self.message([self.a]))
+        with patch.object(self.node.get_clock(),'now',return_value=rclpy.time.Time(nanoseconds=original+2_400_000_000)):
+            self.observe([self.a]);self.assertTrue(output[-1].prediction_allowed)
+        with patch.object(self.node.get_clock(),'now',return_value=rclpy.time.Time(nanoseconds=original+2_510_000_000)):
+            self.observe([self.a]);self.assertFalse(output[-1].prediction_allowed)
+
+    def test_depth_failure_conflict_and_cancel_cannot_authorize_prediction(self):
+        output=[]
+        self.node.pub=type('Capture',(),{'publish':lambda _,m:output.append(m)})()
+        self.observe([self.a]);self.select(2)
+        self.a.position_valid=False;self.observe([self.a])
+        self.assertFalse(output[-1].observed)
+        self.assertFalse(output[-1].prediction_allowed)
+        self.a.position_valid=True;self.a.association_ambiguous=True
+        self.observe([self.a]);self.a.observed=False;self.observe([self.a])
+        self.assertFalse(output[-1].prediction_allowed)
+        self.select(0)
+        self.assertFalse(output[-1].prediction_allowed)
+
     def test_tf_disabled_until_selection_and_cancel(self):
         self.observe([self.a, self.b])
         self.collect()
@@ -105,15 +206,51 @@ class FollowingIdentityTest(unittest.TestCase):
         self.assertEqual(self.node.state, FollowingTarget.TRACKING)
         self.assertEqual(self.transforms[-1].header.stamp, msg.header.stamp)
         self.a.position_valid = False
+        original_stamp = self.node.last_good[0].stamp
+        self.observe([self.a])
+        self.assertEqual(self.node.state, FollowingTarget.TRACKING)
+        self.assertEqual(self.node.last_good[0].stamp, original_stamp)
+        self.node.last_good[0].stamp.sec -= 1
         self.observe([self.a])
         self.assertEqual(self.node.state, FollowingTarget.LOST)
         self.a.position_valid = True
         self.observe([self.a])
         self.assertEqual(self.node.state, FollowingTarget.TRACKING)
 
+    def test_brief_missed_detection_preserves_identity_without_restamping(self):
+        self.observe([self.a])
+        self.select(2)
+        stamp = self.node.last_good[0].stamp
+        self.a.observed = False
+        self.observe([self.a])
+        self.assertEqual(self.node.state, FollowingTarget.TRACKING)
+        self.assertEqual(self.node.last_good[0].stamp, stamp)
+        self.assertEqual(self.node.reacquire_after, -1)
+        self.a.observed = True
+        self.a.identity_state = self.a.TRACKED
+        self.observe([self.a])
+        self.assertEqual(self.node.state, FollowingTarget.TRACKING)
+
+    def test_duplicate_identity_and_clock_reset_invalidate_cached_position(self):
+        from unittest.mock import patch
+        self.observe([self.a])
+        self.select(2)
+        duplicate = self.person(11, 2, 'furia')
+        self.observe([self.a, duplicate])
+        self.assertEqual(self.node.state, FollowingTarget.LOST)
+        self.assertIsNone(self.node.last_good)
+        self.observe([self.a])
+        self.select(2)
+        previous = self.node.get_clock().now().nanoseconds
+        with patch.object(self.node.get_clock(), 'now', return_value=rclpy.time.Time(nanoseconds=previous-1000000000)):
+            self.node.watchdog()
+        self.assertEqual(self.node.state, FollowingTarget.LOST)
+        self.assertIsNone(self.node.last_good)
+
     def test_loss_requires_same_identity_new_face_on_new_raw_track(self):
         old = self.observe([self.a, self.b])
         self.select(2)
+        self.node.last_good[0].stamp.sec -= 3
         self.observe([self.b])
         self.assertEqual(self.node.identity, 2)
         self.assertEqual(self.node.state, FollowingTarget.LOST)

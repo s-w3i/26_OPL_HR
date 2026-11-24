@@ -3,16 +3,14 @@
 ## Build
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-source ~/orbbec_ws/install/setup.bash  # Gemini 335 driver overlay
-cd ~/opl_ros
-colcon build --symlink-install --packages-up-to opl_human_vision
-source install/setup.bash
+/home/usern/vision/hr_ws/build.sh
+source /home/usern/vision/hr_ws/env.sh
 ```
 
-If using the Jazzy apt-installed Orbbec driver, omit the `orbbec_ws` source line.
-In each new terminal, source ROS, the camera-driver overlay, and this workspace
-before launching.
+This builds all three source packages into the single `install` directory with
+symlink installation and Release optimization. The build wrapper uses a clean
+Jazzy environment, avoiding stale overlays. In each new terminal, source `env.sh`
+before launching. Rebuilding does not restart the running pipeline.
 
 ## Launch
 

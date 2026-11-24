@@ -179,6 +179,25 @@ FaceRecognizerNode::on_configure(const rclcpp_lifecycle::State &)
     );
 
 
+  enrollment_session_id_ = std::to_string(
+    std::chrono::system_clock::now().time_since_epoch().count());
+  registry_srv_ = create_service<opl_interfaces::srv::ListEnrolledIdentities>(
+    "~/list_enrolled_identities",
+    [this](const std::shared_ptr<opl_interfaces::srv::ListEnrolledIdentities::Request>,
+           std::shared_ptr<opl_interfaces::srv::ListEnrolledIdentities::Response> response) {
+      std::lock_guard<std::mutex> lock(engine_mutex_);
+      response->session_id = enrollment_session_id_;
+      response->success = face_engine_ && recognized_pub_ && recognized_pub_->is_activated();
+      response->message = response->success ? "Current recognizer session" : "Recognizer is not active";
+      if (!response->success) return;
+      for (const auto& [id, name] : face_engine_->enrolledIdentities()) {
+        opl_interfaces::msg::EnrolledIdentity entry;
+        entry.identity_id = id;
+        entry.name = name;
+        response->identities.push_back(entry);
+      }
+    });
+
   enroll_srv_ =
     create_service<opl_interfaces::srv::EnrollPerson>(
       "~/enroll_person",
@@ -300,6 +319,7 @@ FaceRecognizerNode::on_cleanup(
 {
   recognized_pub_.reset();
   enroll_srv_.reset();
+  registry_srv_.reset();
   face_engine_.reset();
 
 

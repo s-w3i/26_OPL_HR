@@ -8,3 +8,7 @@ string name
 geometry_msgs/Point position_3d
 bool valid
 uint8 state
+# True only for a current valid measured 3-D observation; cached positions are false.
+bool observed
+# Only ordinary missed detections with fresh stream and unambiguous enrolled identity.
+bool prediction_allowed

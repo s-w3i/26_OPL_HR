@@ -253,6 +253,7 @@ def generate_launch_description():
         package='opl_human_vision',
         executable='following_target.py',
         name='following_target',
+        condition=IfCondition(LaunchConfiguration('launch_following_selector')),
         parameters=[{'max_observation_age_sec': LaunchConfiguration('following_max_observation_age_sec')}],
         output='screen',
     )
@@ -265,6 +266,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument('launch_following_selector', default_value='true',
+                              description='Disable when the selector is supervised separately'),
         # Camera Arguments
         width_arg, height_arg, fps_arg, device_arg, camera_type_arg, launch_camera_arg, visualizer_arg, following_age_arg,
         # Detector Arguments

@@ -5,6 +5,7 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <opl_interfaces/msg/tracked_human_array.hpp>
 #include <opl_interfaces/srv/enroll_person.hpp>
+#include <opl_interfaces/srv/list_enrolled_identities.hpp>
 
 #include "opl_human_vision/face_engine.hpp"
 
@@ -111,6 +112,9 @@ private:
   rclcpp::Service<
     opl_interfaces::srv::EnrollPerson
   >::SharedPtr enroll_srv_;
+
+  rclcpp::Service<opl_interfaces::srv::ListEnrolledIdentities>::SharedPtr registry_srv_;
+  std::string enrollment_session_id_;
 
   std::shared_ptr<FaceEngine>
     face_engine_;

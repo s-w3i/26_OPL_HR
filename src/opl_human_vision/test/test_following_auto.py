@@ -74,6 +74,7 @@ class AutomaticFollowingTests(unittest.TestCase):
     def test_lost_or_ambiguous_person_is_never_replaced_automatically(self):
         self.observe([self.person(1)])
         self.enable()
+        self.node.last_good[0].stamp.sec -= 1
         self.observe([self.person(2)])
         self.assertEqual(self.node.selected, 1)
         self.assertEqual(self.node.state, FollowingTarget.LOST)
@@ -90,6 +91,9 @@ class AutomaticFollowingTests(unittest.TestCase):
         self.observe([person])
         self.enable()
         person.position_valid = False
+        message = self.observe([person])
+        self.assertEqual(self.node.state, FollowingTarget.TRACKING)
+        self.node.last_good[0].stamp.sec -= 1
         message = self.observe([person])
         self.assertEqual(self.node.state, FollowingTarget.LOST)
         self.node.recognized(message)

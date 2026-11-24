@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
+import base64
+import json
+import sys
+
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 from sensor_msgs.msg import Image
 from opl_interfaces.msg import TrackedHumanArray
 from cv_bridge import CvBridge
@@ -30,6 +35,12 @@ class PipelineVisualizer(Node):
         self.declare_parameter('image_topic', 'camera/camera/color/image_raw')
         self.declare_parameter('recognized_topic', 'recognized_humans')
         self.declare_parameter('show_depth', True)
+        self.show_window = self.declare_parameter('show_window', True).value
+        self.stream_jpeg = self.declare_parameter('stream_jpeg', False).value
+        render_hz = float(self.declare_parameter('render_hz', 15.0).value)
+        if not 0 < render_hz <= 30:
+            raise ValueError('render_hz must be between 0 and 30')
+        self.human_stamp_ns = 0
         self.show_depth = self.get_parameter('show_depth').get_parameter_value().bool_value
 
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
@@ -63,7 +74,7 @@ class PipelineVisualizer(Node):
             self.recognized_callback,
             image_qos
         )
-        self.render_timer = self.create_timer(1.0 / 15.0, self.render_frame)
+        self.render_timer = None if self.stream_jpeg else self.create_timer(1.0 / render_hz, self.render_frame)
 
         self.get_logger().info(f"Visualizer subscribed to '{image_topic}' & '{recognized_topic}'")
 
@@ -77,9 +88,12 @@ class PipelineVisualizer(Node):
         # Very cheap callback.
         # Keep only the newest ROS image message.
         self.latest_image_msg = msg
+        if self.stream_jpeg:
+            self.render_frame()
 
     def recognized_callback(self, human_msg):
         self.latest_humans = human_msg.humans
+        self.human_stamp_ns = human_msg.header.stamp.sec * 10**9 + human_msg.header.stamp.nanosec
 
     def render_frame(self):
         if self.latest_image_msg is not None:
@@ -87,23 +101,29 @@ class PipelineVisualizer(Node):
             # Consume the newest image.
             msg = self.latest_image_msg
             self.latest_image_msg = None
+            stamp_ns = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
+            if not 0 <= (self.get_clock().now().nanoseconds-stamp_ns)/1e9 <= 1.0:
+                return
 
             try:
                 display_frame = self.bridge.imgmsg_to_cv2(
                     msg,
                     desired_encoding='bgr8'
-                )
+                ).copy()
             except Exception as e:
                 self.get_logger().error(
                     f"cv_bridge exception: {e}"
                 )
                 return
 
-            humans = self.latest_humans
+            # Never draw cached detections on a newer camera frame after recognition stops.
+            humans = self.latest_humans if abs(stamp_ns-self.human_stamp_ns) <= 300_000_000 else []
 
             img_h, img_w = display_frame.shape[:2]
 
             for human in humans:
+                if not human.observed:
+                    continue
                 x, y = int(human.bbox.x_offset), int(human.bbox.y_offset)
                 w, h = int(human.bbox.width), int(human.bbox.height)
 
@@ -148,8 +168,15 @@ class PipelineVisualizer(Node):
                 cv2.putText(display_frame, label, (x + 3, label_y - 2), font, 0.55, text_color, 2)
 
             self.rendered_frame = display_frame
+            if self.stream_jpeg:
+                if img_w > 960:
+                    display_frame = cv2.resize(display_frame, (960, max(1, int(img_h*960/img_w))))
+                ok, encoded = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                if ok:
+                    packet = {'stamp_ns': stamp_ns, 'jpeg': base64.b64encode(encoded).decode('ascii')}
+                    print('VISION_FRAME '+json.dumps(packet, separators=(',', ':')), flush=True)
 
-        if self.rendered_frame is not None:
+        if self.show_window and self.rendered_frame is not None:
             cv2.imshow("OPL Human Vision Pipeline", self.rendered_frame)
             cv2.waitKey(1)
 
@@ -160,12 +187,14 @@ def main(args=None):
 
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException, BrokenPipeError):
         pass
     finally:
-        cv2.destroyAllWindows()
+        if node.show_window:
+            cv2.destroyAllWindows()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

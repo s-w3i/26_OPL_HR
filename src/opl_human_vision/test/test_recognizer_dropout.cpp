@@ -67,7 +67,19 @@ int main(int argc, char** argv) {
   auto expired = client->async_send_request(request);
   assert(executor.spin_until_future_complete(expired, std::chrono::seconds(1)) == rclcpp::FutureReturnCode::SUCCESS);
   assert(!expired.get()->success);
+  auto registry = probe->create_client<opl_interfaces::srv::ListEnrolledIdentities>(
+    "/face_recognizer_node/list_enrolled_identities");
+  auto query = [&]() {
+    auto f = registry->async_send_request(std::make_shared<opl_interfaces::srv::ListEnrolledIdentities::Request>());
+    assert(executor.spin_until_future_complete(f, std::chrono::seconds(2)) == rclcpp::FutureReturnCode::SUCCESS);
+    return f.get();
+  };
+  auto listed = query();
+  assert(listed->success && listed->identities.empty() && !listed->session_id.empty());
+  // Enrollment authorization without a confirmed face must not create registry metadata.
+  assert(query()->session_id == listed->session_id);
   recognizer->deactivate();
+  assert(!query()->success);
   recognizer->cleanup();
   for (const auto& name : {"scrfd_conf_threshold", "scrfd_nms_threshold"}) {
     for (double value : {-0.01, 1.01, std::numeric_limits<double>::quiet_NaN()}) {

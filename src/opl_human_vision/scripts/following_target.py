@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Service-selected person observations and TF; never command robot motion."""
 from collections import Counter
+from copy import deepcopy
 import math
 import time
 import rclpy
@@ -9,8 +10,12 @@ from rclpy.qos import qos_profile_sensor_data
 from geometry_msgs.msg import TransformStamped
 from tf2_ros import TransformBroadcaster
 from std_srvs.srv import SetBool
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from opl_interfaces.msg import FollowingTarget, TrackedHumanArray
 from opl_interfaces.srv import SelectTarget
+
+
+PREDICTION_HORIZON_SEC = 2.5
 
 
 class FollowingTargetNode(Node):
@@ -28,13 +33,17 @@ class FollowingTargetNode(Node):
         self.visible = {}
         self.identities = {}
         self.uncertain = {}
+        self.recognition_missing = set()
         self.identity_stamps = {}
         self.last_receive = 0.0
         self.last_header = None
         self.reacquire_after = -1
         self.last_tf = None
+        self.last_good = None
+        self.last_clock = self.get_clock().now().nanoseconds
         self.state = FollowingTarget.UNSELECTED
         self.pub = self.create_publisher(FollowingTarget, 'following_target', 1)
+        self.prediction_status = self.create_publisher(DiagnosticArray, '/person_tracking/prediction_status', 1)
         self.broadcaster = TransformBroadcaster(self)
         self.create_subscription(TrackedHumanArray, 'tracked_humans', self.tracks, qos_profile_sensor_data)
         self.create_subscription(TrackedHumanArray, 'recognized_humans', self.recognized, qos_profile_sensor_data)
@@ -61,6 +70,7 @@ class FollowingTargetNode(Node):
                 and human.position_3d.z > 0)
 
     def lose(self, stamp):
+        self.last_good = None
         if (self.identity or self.automatic) and self.reacquire_after < 0:
             self.reacquire_after = stamp
 
@@ -76,7 +86,9 @@ class FollowingTargetNode(Node):
             response.success = False
             response.message = 'Exactly one fresh, unambiguous tracked person with valid depth is required'
             return response
+        self.last_good = None
         self.selected, self.identity, self.name = candidates[0], 0, ''
+        self.recognition_missing.clear()
         self.automatic = True
         self.uncertain.pop(self.selected, None)
         self.reacquire_after, self.last_tf = -1, None
@@ -87,6 +99,8 @@ class FollowingTargetNode(Node):
     def select(self, request, response):
         identity = request.identity_id
         if identity == 0:
+            self.last_good = None
+            self.recognition_missing.clear()
             self.selected, self.identity, self.name = 0, 0, ''
             self.automatic = False
             self.reacquire_after, self.last_tf = -1, None
@@ -103,7 +117,7 @@ class FollowingTargetNode(Node):
             return response
         raw = matches[0]
         known = self.identities[raw]
-        if (not self.valid_observation(self.visible.get(raw)) or raw in self.uncertain
+        if (not self.valid_observation(self.visible.get(raw)) or raw in self.uncertain or raw in self.recognition_missing
                 or (self.reacquire_after >= 0 and identity == self.identity)):
             response.success = False
             human = self.visible[raw]
@@ -114,6 +128,7 @@ class FollowingTargetNode(Node):
                 f'identity_uncertain={raw in self.uncertain}, '
                 f'face_reacquisition_required={self.reacquire_after >= 0 and identity == self.identity}')
             return response
+        self.last_good = None
         self.selected = raw
         self.automatic = False
         self.identity, self.name = known[:2]
@@ -130,6 +145,9 @@ class FollowingTargetNode(Node):
             return
         stamp = self.stamp(msg.header)
         candidates = []
+        if self.identity and sum(h.observed and h.track_id == self.identity for h in msg.humans) > 1:
+            self.lose(stamp)
+            self.uncertain[self.selected] = stamp
         for human in msg.humans:
             raw = human.raw_track_id
             current = self.visible.get(raw)
@@ -143,10 +161,22 @@ class FollowingTargetNode(Node):
                 self.uncertain[raw] = max(stamp, self.uncertain.get(raw, -1))
             if not enrolled:
                 if human.observed:
-                    self.identities.pop(raw, None)
-                    if raw == self.selected:
-                        self.lose(stamp)
+                    known = self.identities.get(raw)
+                    ordinary_recognition_gap = (
+                        raw == self.selected and self.identity > 0 and known is not None
+                        and known[0] == self.identity and human.identity_state == human.UNCONFIRMED
+                        and not human.association_ambiguous and raw not in self.uncertain
+                        and self.reacquire_after < 0 and self.last_good is not None
+                        and self.last_good[2] == (self.identity, raw)
+                        and 0 <= self.age(self.last_good[0]) < PREDICTION_HORIZON_SEC)
+                    if ordinary_recognition_gap:
+                        self.recognition_missing.add(raw)
+                    else:
+                        self.identities.pop(raw, None)
+                        if raw == self.selected:
+                            self.lose(stamp)
                 continue
+            self.recognition_missing.discard(raw)
             if raw in self.uncertain:
                 if human.identity_state != human.FACE_CONFIRMED or stamp <= self.uncertain[raw]:
                     continue
@@ -180,9 +210,10 @@ class FollowingTargetNode(Node):
                 self.uncertain[human.raw_track_id] = max(stamp, self.uncertain.get(human.raw_track_id, -1))
                 self.identities.pop(human.raw_track_id, None)
         current = self.visible.get(self.selected)
-        if (current is None or current.association_ambiguous
-                or (not self.automatic and not current.observed)
-                or (self.automatic and self.raw_counts.get(self.selected) != 1)):
+        ambiguous = (current is not None and current.association_ambiguous) or self.raw_counts.get(self.selected, 0) > 1
+        missing = current is None or not current.observed or self.selected in self.recognition_missing
+        loss_horizon = PREDICTION_HORIZON_SEC if self.identity and not self.automatic else .75
+        if ambiguous or (missing and (self.last_good is None or self.age(self.last_good[0]) >= loss_horizon)):
             self.lose(stamp)
         self.uncertain = {k: v for k, v in self.uncertain.items() if k in self.visible or k == self.selected}
         self.identities = {k: v for k, v in self.identities.items() if k in self.visible or k == self.selected}
@@ -197,11 +228,59 @@ class FollowingTargetNode(Node):
         out.state = FollowingTarget.LOST if (self.identity or self.automatic) else FollowingTarget.UNSELECTED
         human = self.visible.get(self.selected)
         known = self.identities.get(self.selected)
-        known_fresh = known is not None and 0 <= (self.get_clock().now().nanoseconds - known[2]) / 1e9 <= 0.75
+        identity_age = ((self.get_clock().now().nanoseconds-known[2])/1e9 if known else float('inf'))
+        measured_age = self.age(self.last_good[0]) if self.last_good else float('inf')
+        missing = human is None or not human.observed or self.selected in self.recognition_missing
+        ordinary_window = bool(self.identity and missing and self.fresh()
+            and self.reacquire_after < 0 and self.selected not in self.uncertain
+            and self.last_good is not None and self.last_good[2] == (self.identity,self.selected)
+            and 0 <= measured_age < PREDICTION_HORIZON_SEC)
+        known_fresh = known is not None and 0 <= identity_age <= (
+            PREDICTION_HORIZON_SEC if ordinary_window else .75)
         if self.identity and (not known_fresh or known[0] != self.identity):
             self.lose(self.stamp(out.header))
         if ((self.identity or self.automatic) and self.reacquire_after < 0 and (self.automatic or known_fresh)
-                and self.selected not in self.uncertain and self.valid_observation(human)):
+                and self.selected not in self.uncertain):
+            if self.selected not in self.recognition_missing and self.valid_observation(human):
+                self.last_good = (deepcopy(self.last_header), deepcopy(human), (self.identity, self.selected))
+            elif (self.last_good is not None and self.last_good[2] == (self.identity, self.selected)
+                  and 0 <= self.age(self.last_good[0]) <= self.max_observation_age_sec
+                  and time.monotonic() - self.last_receive <= .15):
+                out.header, human = self.last_good[:2]
+            else:
+                human = None
+        else:
+            human = None
+        current = self.visible.get(self.selected)
+        out.observed = human is not None and self.selected not in self.recognition_missing and self.valid_observation(current)
+        missing = current is None or not current.observed or self.selected in self.recognition_missing
+        gates = {
+            'no_enrolled_selection': self.identity > 0 and not self.automatic,
+            'not_an_ordinary_missed_detection': missing,
+            'tracking_stream_stale': self.fresh(),
+            'depth_unavailable': current is None or not current.observed or self.valid_observation(current),
+            'ambiguous_association': self.selected not in self.uncertain and
+                self.raw_counts.get(self.selected,0) <= 1 and
+                (current is None or not current.association_ambiguous),
+            'identity_evidence_missing_or_conflicting': known is not None and known[0] == self.identity,
+            'identity_evidence_expired': known_fresh,
+            'identity_reacquisition_required': self.reacquire_after < 0,
+            'no_measured_history': self.last_good is not None and self.last_good[2] == (self.identity,self.selected),
+            'prediction_capture_deadline': 0 <= measured_age < PREDICTION_HORIZON_SEC,
+        }
+        out.prediction_allowed = all(gates.values())
+        reason = 'measured' if out.observed else 'eligible' if out.prediction_allowed else next(
+            reason for reason,ok in gates.items() if not ok)
+        diagnostics = DiagnosticArray(status=[DiagnosticStatus(
+            name='following_prediction_eligibility', message=reason,
+            values=[KeyValue(key='identity_id',value=str(self.identity)),
+                    KeyValue(key='raw_track_id',value=str(self.selected)),
+                    KeyValue(key='measurement_age',value=str(measured_age)),
+                    KeyValue(key='identity_age',value=str(identity_age)),
+                    KeyValue(key='recognition_confirmation_missing',value=str(self.selected in self.recognition_missing).lower())])])
+        diagnostics.header.stamp = self.get_clock().now().to_msg()
+        self.prediction_status.publish(diagnostics)
+        if human is not None:
             out.position_3d = human.position_3d
             out.valid, out.state = True, FollowingTarget.TRACKING
             frame = f'opl_hr_track_{self.selected}' if self.automatic else f'opl_hr_person_{self.identity}'
@@ -220,6 +299,17 @@ class FollowingTargetNode(Node):
         self.pub.publish(out)
 
     def watchdog(self):
+        now = self.get_clock().now().nanoseconds
+        if now < self.last_clock:
+            self.lose(now)
+            self.reacquire_after = now
+            self.last_header = None
+            self.visible.clear()
+            self.identities.clear()
+            self.recognition_missing.clear()
+            self.identity_stamps.clear()
+            self.publish()
+        self.last_clock = now
         if (self.identity or self.automatic) and not self.fresh():
             if time.monotonic() - self.last_receive > 0.75:
                 self.lose(self.get_clock().now().nanoseconds)

@@ -15,6 +15,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <utility>
 
 namespace opl_human_vision {
 
@@ -120,6 +121,17 @@ public:
     FaceResult result, uint64_t raw_track_id,
     const std::set<uint64_t>& occupied_ids,
     const geometry_msgs::msg::Point& position_3d, int64_t image_stamp);
+
+  // Caller holds the recognizer engine mutex; metadata excludes biometric templates.
+  std::vector<std::pair<uint64_t, std::string>> enrolledIdentities() const {
+    std::vector<std::pair<uint64_t, std::string>> result;
+    for (const auto& person : reid_gallery_) {
+      if (person.persistent_id > 0 && person.persistent_id < SESSION_ID_BASE)
+        result.emplace_back(person.persistent_id, person.name);
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+  }
 
   void invalidateTrack(uint64_t raw_track_id);
 

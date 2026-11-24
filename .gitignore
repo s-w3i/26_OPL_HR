@@ -11,3 +11,11 @@ log/
 .superpowers/
 .private
 docs
+
+# Side-by-side prediction interface overlay
+build_prediction_interfaces/
+install_prediction_interfaces/
+
+# Vision-panel side-by-side deployment
+build_vision_panel/
+install_vision_panel/

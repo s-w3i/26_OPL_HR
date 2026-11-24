@@ -43,6 +43,9 @@ int main() {
   assert(r.persistent_id != 1);
   r = engine.processFeatures(face, 2, {}, p, 10);
   assert(r.persistent_id == 1 && r.identity_state == IdentityState::FaceConfirmed);
+  auto registry = engine.enrolledIdentities();
+  assert(registry.size() == 1 && registry[0].first == 1 && registry[0].second == "furia");
+  // Raw/session identities do not enter the enrolled gallery, even when observed.
   // Ownership guard blocks duplicate use even from the engine's cache.
   r = engine.processFeatures(face, 2, {1}, p, 11);
   assert(r.persistent_id != 1);
@@ -54,6 +57,8 @@ int main() {
   engine.processFeatures(covered, 3, {}, p, 13);
   r = engine.processFeatures(covered, 3, {}, p, 14);
   assert(r.just_scanned && r.persistent_id == 2 && r.name == "other");
+  registry = engine.enrolledIdentities();
+  assert(registry.size() == 2 && registry[1].first == 2 && registry[1].second == "other");
   engine.processFeatures(covered, 2, {}, p, 15);
   engine.processFeatures(covered, 2, {}, p, 16);
   r = engine.processFeatures(covered, 2, {}, p, 17);

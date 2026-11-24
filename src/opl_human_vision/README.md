@@ -138,3 +138,54 @@ hardware testing; the deterministic tests do not establish either.
 The `following_target` node now exposes `/person_tracking/set_enabled` (`std_srvs/srv/SetBool`). Enabling requires exactly one fresh, unambiguous raw track with valid depth; no enrollment or identity ID is needed. It publishes that selected person's TF as `opl_hr_track_<raw_track_id>` and valid `/following_target` observations. Disabling clears the selection and stops TF updates. A selected target is never replaced automatically; ambiguity, disappearance, or a prolonged stream gap latches loss until the operator stops and starts following again. Temporary invalid depth pauses output and can recover on the same continuing raw track.
 
 The existing `/select_following_target` enrolled-ID workflow remains available. The MCP `follow_person` tool automatically calls the tracking and following enable services, and `cancel_navigation` confirms following/navigation stop. The tracking node itself never commands base motion.
+
+## Short-gap continuity
+
+A selected confirmed identity survives a brief missed detection. Only the last
+measured position may be reused within the configured capture-age budget (300 ms
+in the deployed head-camera launch), with its original timestamp and the
+existing receipt watchdog. No predicted position produces a new TF sample.
+Ambiguity, conflicting/duplicate identities, prolonged loss and clock resets
+clear the cache and require fresh identity confirmation.
+
+The deployed on-demand system supervises the selector separately through
+`human-vision-selector.service`, attached to `human-vision.service`. The parent
+launch uses `launch_following_selector:=false` to avoid a duplicate selector.
+This permits restarting the selector without clearing face-recognizer enrollment.
+Standalone launches retain `launch_following_selector:=true` by default.
+
+## Follower prediction eligibility
+
+`FollowingTarget.observed` distinguishes actual current 3-D measurements from
+cached sightings. `prediction_allowed` is true only for an ordinary missed
+detection of the selected enrolled identity with fresh tracking input, a recent
+last-good position, and no ambiguity or identity conflict. It does not authorize
+raw-only following, invalid depth, expired identity evidence or pipeline failures.
+The selector itself does not predict or move its measured person TF.
+
+The robot-base `person_following` package uses those flags for a separately
+marked estimate in odometry, lasting at most 2.5 s from the last capture. Its
+predicted TF is `opl_hr_follow_target_predicted`; estimates cannot start following
+or satisfy a new-sighting requirement. MCP startup now requires `observed=true`.
+
+For the deployed selector, the `prediction.conf` systemd override sources
+`26_OPL_HR/install_prediction_interfaces` after the normal install. This keeps
+interface upgrades separate from the running recognizer's loaded libraries and
+preserves its in-memory enrolled IDs. Source that overlay for standalone selector
+launches too; all `FollowingTarget` consumers need the updated message definition.
+
+The prediction window is now 2.5 s. Only an ordinary missed detection with a fresh
+stream can retain the selected identity evidence for that window; ambiguity and
+conflicting identities still stop immediately. `/person_tracking/prediction_status`
+reports the exact eligibility gate, measured age and identity age for diagnosis.
+
+## Vision control-panel registry
+
+The recognizer exposes read-only `~/list_enrolled_identities` using
+`opl_interfaces/srv/ListEnrolledIdentities`. It returns enrolled ID/name metadata
+from the authoritative FaceEngine gallery under the existing engine mutex, plus
+a session ID that changes when the gallery is recreated. Anonymous session IDs,
+images and biometric templates are excluded. Inactive recognition returns an
+unavailable response rather than an empty active registry. Robot Base Control's
+Vision tab and the passive Vision MCP tools consume this metadata. Enrollment
+remains in-memory and is lost on recognizer restart.
