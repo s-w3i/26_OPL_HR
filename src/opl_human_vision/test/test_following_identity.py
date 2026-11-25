@@ -77,6 +77,66 @@ class FollowingIdentityTest(unittest.TestCase):
         self.node.last_receive-=.16;self.node.watchdog()
         self.assertFalse(output[-1].prediction_allowed)
 
+    def test_navigation_absence_outlives_prediction_and_revokes_on_stream_failure(self):
+        from unittest.mock import patch
+
+        status = []
+        targets = []
+        self.node.prediction_status = type('Capture', (), {'publish': lambda _, msg: status.append(msg)})()
+        self.node.pub = type('Capture', (), {'publish': lambda _, msg: targets.append(msg)})()
+
+        def values():
+            return {value.key: value.value for value in status[-1].status[0].values}
+
+        self.observe([self.a])
+        self.assertTrue(self.select(2).success)
+        selection = values().get('selection_generation')
+        self.assertTrue(selection)
+        self.assertEqual(values().get('navigation_visibility'), 'observed')
+        self.observe([])
+        self.assertEqual(values().get('navigation_visibility'), 'absent')
+        original = self.node.get_clock().now().nanoseconds
+        for frame in range(1, 14):
+            now = rclpy.time.Time(nanoseconds=original + frame * 250_000_000)
+            with patch.object(self.node.get_clock(), 'now', return_value=now):
+                self.observe([])
+        self.assertFalse(targets[-1].prediction_allowed)
+        self.assertEqual(values().get('navigation_visibility'), 'absent')
+        self.assertEqual(values().get('selection_generation'), selection)
+        with patch.object(self.node.get_clock(), 'now', return_value=now):
+            self.node.last_receive -= .2
+            self.node.watchdog()
+            self.assertEqual(values().get('navigation_visibility'), 'invalid')
+        with patch.object(self.node.get_clock(), 'now', return_value=now + rclpy.time.Duration(seconds=.1)):
+            self.observe([])
+            self.assertEqual(values().get('navigation_visibility'), 'invalid')
+        self.select(0)
+        self.assertNotEqual(values().get('selection_generation'), selection)
+
+    def test_navigation_keeps_same_identity_on_depth_loss_and_revokes_on_conflict(self):
+        from unittest.mock import patch
+
+        status = []
+        self.node.prediction_status = type('Capture', (), {'publish': lambda _, msg: status.append(msg)})()
+
+        def visibility():
+            return {value.key: value.value for value in status[-1].status[0].values}['navigation_visibility']
+
+        self.observe([self.a])
+        self.assertTrue(self.select(2).success)
+        self.assertEqual(visibility(), 'observed')
+        self.a.position_valid = False
+        original = self.node.get_clock().now().nanoseconds
+        for frame in range(1, 14):
+            now = rclpy.time.Time(nanoseconds=original + frame * 250_000_000)
+            with patch.object(self.node.get_clock(), 'now', return_value=now):
+                self.observe([self.a])
+                self.assertEqual(visibility(), 'position_unavailable')
+        self.a.track_id = 3
+        with patch.object(self.node.get_clock(), 'now', return_value=now + rclpy.time.Duration(seconds=.1)):
+            self.observe([self.a])
+            self.assertEqual(visibility(), 'invalid')
+
     def test_ordinary_loss_can_predict_past_750ms_but_stops_at_two_point_five_seconds(self):
         from unittest.mock import patch
         output=[]
